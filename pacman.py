@@ -2,6 +2,7 @@ import pygame
 import random
 import os
 import io
+import sys # sys 모듈 추가 (Quit 기능에 사용)
 import requests
 from math import sqrt, cos, sin
 from collections import deque
@@ -18,6 +19,7 @@ SCREEN_WIDTH, SCREEN_HEIGHT = SCREEN_WIDTH_TILES * TILE_WIDTH, SCREEN_HEIGHT_TIL
 
 # 색상
 BLACK, WHITE, BLUE, YELLOW, RED, PINK, CYAN, ORANGE = (0,0,0), (255,255,255), (0,0,255), (255,255,0), (255,0,0), (255,184,222), (0,255,255), (255,184,82)
+BUTTON_COLOR, BUTTON_TEXT_COLOR, BUTTON_HOVER_COLOR = (0, 100, 200), (255, 255, 255), (0, 150, 255) # 버튼 색상 추가
 
 # 게임 상태
 STATE_PLAYING, STATE_GAME_OVER, STATE_WIN, STATE_PAUSED = 1, 2, 3, 4
@@ -57,7 +59,6 @@ LEVEL_DATA = '''
 101 2 2 2 2 2 2 2 2 3 2 2 2 2 2 2 2 2 101
 105 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 106
 '''
-
 
 
 def load_image_from_pokeapi(pokemon_name):
@@ -117,13 +118,17 @@ def find_shortest_path_bfs(start_pos, end_pos, level):
 
 class Level:
     def __init__(self):
+        self.original_map_data = LEVEL_DATA.strip()
         self.map, self.ghost_start_pos, self.wall_tiles = [], {}, []
         self.pacman_start_pos, self.ghost_house_exit, self.pellet_count = Vector2(), Vector2(), 0
         self.total_pellets = 0
         self.load_level()
 
     def load_level(self):
-        for y, line in enumerate(LEVEL_DATA.strip().splitlines()):
+        self.map, self.ghost_start_pos, self.wall_tiles = [], {}, []
+        self.pellet_count = 0
+        self.total_pellets = 0
+        for y, line in enumerate(self.original_map_data.splitlines()):
             row = []
             for x, tile_val in enumerate(line.strip().split()):
                 tile = int(tile_val)
@@ -180,7 +185,8 @@ class Entity:
 class Pacman(Entity):
     def __init__(self, level, start_pos):
         super().__init__(level, start_pos)
-        self.buffered_direction, self.lives, self.score, self.bonus_life_awarded, self.speed = Vector2(0,0), 1, 0, False, PACMAN_SPEED
+        # NOTE: 초기 목숨을 3으로 설정
+        self.buffered_direction, self.lives, self.score, self.bonus_life_awarded, self.speed = Vector2(0,0), 3, 0, False, PACMAN_SPEED
         self.last_direction = Vector2(-1, 0)
         self.anim_frame = 0
         self.anim_timer = 0
@@ -434,11 +440,20 @@ class GameController:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Pacman"); self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 36)
-        self.state = STATE_PLAYING; self.start_new_game()
+        pygame.display.set_caption("Pacman")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.Font(None, 36)
+        self.small_font = pygame.font.Font(None, 28) # 작은 폰트 추가 (버튼용)
+        
+        # NOTE: init_game()을 호출하여 게임을 시작
+        self.init_game()
 
-    def start_new_game(self):
+    # NOTE: 게임을 초기 상태로 리셋하는 함수
+    def init_game(self):
+        self.state = STATE_PLAYING
         self.level = Level()
+        self.level.load_level() # 맵 다시 로드
+        
         self.ghost_images = {}
         try:
             frightened_img = pygame.image.load(os.path.join(RES_DIR, 'frightened.png')).convert_alpha()
@@ -453,6 +468,11 @@ class GameController:
             self.ghost_images = None
 
         self.pacman = Pacman(self.level, self.level.pacman_start_pos)
+        # NOTE: 점수, 목숨 등 모든 것을 리셋
+        self.pacman.score = 0
+        self.pacman.lives = 3
+        self.pacman.bonus_life_awarded = False
+
         self.ghosts = [Blinky(self.level, self.level.ghost_start_pos[0]), Pinky(self.level, self.level.ghost_start_pos[1]), Inky(self.level, self.level.ghost_start_pos[2]), Clyde(self.level, self.level.ghost_start_pos[3])]
         self.blinky = self.ghosts[0]
         self.frightened_timer, self.scatter_chase_timer, self.current_wave, self.ghost_eaten_score = 0, 0, 0, 200
@@ -471,6 +491,10 @@ class GameController:
 
         self.win_pacmans = []
         self.win_angle = 0
+        
+        # 게임 시작 시 일시정지 상태로 시작
+        self.state = STATE_PAUSED
+        self.pause_timer = 60
 
     def reset_after_death(self):
         self.pacman.reset()
@@ -625,8 +649,12 @@ class GameController:
         
         if pacman_died:
             self.pacman.lives -= 1
-            if self.pacman.lives < 0: self.state = STATE_GAME_OVER
-            else: self.reset_after_death()
+            # NOTE: 목숨이 0보다 크면 죽음 후 리셋, 아니면 게임 오버 상태로 변경
+            if self.pacman.lives > 0:
+                self.reset_after_death()
+            else:
+                self.pacman.lives = 0 # UI에 -1이 표시되지 않도록 0으로 고정
+                self.state = STATE_GAME_OVER
 
     def check_win_condition(self):
         if self.level.pellet_count <= 0 and self.state != STATE_WIN:
@@ -651,15 +679,15 @@ class GameController:
             for pac in self.win_pacmans:
                 rect = pac['image'].get_rect(center=(pac['x'], pac['y']))
                 self.screen.blit(pac['image'], rect)
-        else:
+        # NOTE: 게임 오버 상태일 때는 게임 화면을 그리지 않음
+        elif self.state == STATE_PLAYING or self.state == STATE_PAUSED:
             self.level.draw(self.screen)
             self.pacman.draw(self.screen)
             self.fruit.draw(self.screen)
             for ghost in self.ghosts:
                 ghost.draw(self.screen, self)
             self.draw_ui()
-            if self.state == STATE_GAME_OVER:
-                self.draw_end_screen("GAME OVER")
+        
         pygame.display.flip()
 
     def draw_ui(self):
@@ -671,19 +699,83 @@ class GameController:
         text = self.font.render(msg, True, YELLOW); self.screen.blit(text, text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2-20)))
         score = self.font.render(f"Final Score: {self.pacman.score}", True, WHITE); self.screen.blit(score, score.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2+20)))
 
+    # NOTE: Game Over 화면을 위한 별도의 루프
+    def game_over_loop(self):
+        # 버튼 위치와 크기 설정
+        button_width, button_height = 120, 50
+        retry_button_rect = pygame.Rect(SCREEN_WIDTH/2 - button_width - 20, SCREEN_HEIGHT/2 + 50, button_width, button_height)
+        quit_button_rect = pygame.Rect(SCREEN_WIDTH/2 + 20, SCREEN_HEIGHT/2 + 50, button_width, button_height)
+
+        while True:
+            mouse_pos = pygame.mouse.get_pos()
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                # 마우스 클릭 이벤트 처리
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if retry_button_rect.collidepoint(mouse_pos):
+                        self.init_game() # 게임 재초기화
+                        return # 루프를 빠져나가 메인 게임 루프로 복귀
+                    if quit_button_rect.collidepoint(mouse_pos):
+                        pygame.quit()
+                        sys.exit()
+
+            # 화면 그리기
+            self.screen.fill(BLACK)
+            
+            # "Game Over" 텍스트
+            title_text = self.font.render("Game Over", True, YELLOW)
+            self.screen.blit(title_text, title_text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2 - 50)))
+
+            # 최종 점수
+            score_text = self.small_font.render(f"Final Score: {self.pacman.score}", True, WHITE)
+            self.screen.blit(score_text, score_text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2)))
+
+            # "Retry" 버튼 그리기
+            retry_color = BUTTON_HOVER_COLOR if retry_button_rect.collidepoint(mouse_pos) else BUTTON_COLOR
+            pygame.draw.rect(self.screen, retry_color, retry_button_rect, border_radius=10)
+            retry_text = self.small_font.render("Retry", True, BUTTON_TEXT_COLOR)
+            self.screen.blit(retry_text, retry_text.get_rect(center=retry_button_rect.center))
+
+            # "Quit" 버튼 그리기
+            quit_color = BUTTON_HOVER_COLOR if quit_button_rect.collidepoint(mouse_pos) else BUTTON_COLOR
+            pygame.draw.rect(self.screen, quit_color, quit_button_rect, border_radius=10)
+            quit_text = self.small_font.render("Quit", True, BUTTON_TEXT_COLOR)
+            self.screen.blit(quit_text, quit_text.get_rect(center=quit_button_rect.center))
+
+            pygame.display.flip()
+            self.clock.tick(60)
+
     def run(self):
         running = True
         while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT: running = False
-                if event.type == pygame.KEYDOWN:
-                    if self.state in [STATE_GAME_OVER, STATE_WIN] or event.key == pygame.K_ESCAPE: running = False
-                    elif event.key == pygame.K_LEFT: self.pacman.set_direction(Vector2(-1,0))
-                    elif event.key == pygame.K_RIGHT: self.pacman.set_direction(Vector2(1,0))
-                    elif event.key == pygame.K_UP: self.pacman.set_direction(Vector2(0,-1))
-                    elif event.key == pygame.K_DOWN: self.pacman.set_direction(Vector2(0,1))
-            self.update(); self.draw(); self.clock.tick(60)
+            # NOTE: 게임 상태에 따라 적절한 로직 실행
+            if self.state == STATE_GAME_OVER:
+                self.game_over_loop()
+            elif self.state == STATE_WIN:
+                # (기존) 승리 화면에서 아무 키나 누르면 종료
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: running = False
+                    if event.type == pygame.KEYDOWN: running = False
+                self.update()
+                self.draw()
+            else: # STATE_PLAYING or STATE_PAUSED
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: running = False
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE: running = False
+                        elif event.key == pygame.K_LEFT: self.pacman.set_direction(Vector2(-1,0))
+                        elif event.key == pygame.K_RIGHT: self.pacman.set_direction(Vector2(1,0))
+                        elif event.key == pygame.K_UP: self.pacman.set_direction(Vector2(0,-1))
+                        elif event.key == pygame.K_DOWN: self.pacman.set_direction(Vector2(0,1))
+                self.update()
+                self.draw()
+
+            self.clock.tick(60)
         pygame.quit()
+        sys.exit()
 
 if __name__ == '__main__':
     game = GameController()
