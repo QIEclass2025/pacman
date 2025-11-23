@@ -2,6 +2,7 @@ import pygame
 import random
 import os
 import io
+import sys # sys 모듈 추가 (Quit 기능에 사용)
 import requests
 from math import sqrt, cos, sin
 from collections import deque
@@ -18,6 +19,7 @@ SCREEN_WIDTH, SCREEN_HEIGHT = SCREEN_WIDTH_TILES * TILE_WIDTH, SCREEN_HEIGHT_TIL
 
 # 색상
 BLACK, WHITE, BLUE, YELLOW, RED, PINK, CYAN, ORANGE = (0,0,0), (255,255,255), (0,0,255), (255,255,0), (255,0,0), (255,184,222), (0,255,255), (255,184,82)
+BUTTON_COLOR, BUTTON_TEXT_COLOR, BUTTON_HOVER_COLOR = (0, 100, 200), (255, 255, 255), (0, 150, 255) # 버튼 색상 추가
 
 # 게임 상태
 STATE_PLAYING, STATE_GAME_OVER, STATE_WIN, STATE_PAUSED = 1, 2, 3, 4
@@ -57,7 +59,6 @@ LEVEL_DATA = '''
 101 2 2 2 2 2 2 2 2 3 2 2 2 2 2 2 2 2 101
 105 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 100 106
 '''
-
 
 
 def load_image_from_pokeapi(pokemon_name):
@@ -117,13 +118,17 @@ def find_shortest_path_bfs(start_pos, end_pos, level):
 
 class Level:
     def __init__(self):
+        self.original_map_data = LEVEL_DATA.strip()
         self.map, self.ghost_start_pos, self.wall_tiles = [], {}, []
         self.pacman_start_pos, self.ghost_house_exit, self.pellet_count = Vector2(), Vector2(), 0
         self.total_pellets = 0
         self.load_level()
 
     def load_level(self):
-        for y, line in enumerate(LEVEL_DATA.strip().splitlines()):
+        self.map, self.ghost_start_pos, self.wall_tiles = [], {}, []
+        self.pellet_count = 0
+        self.total_pellets = 0
+        for y, line in enumerate(self.original_map_data.splitlines()):
             row = []
             for x, tile_val in enumerate(line.strip().split()):
                 tile = int(tile_val)
@@ -180,7 +185,7 @@ class Entity:
 class Pacman(Entity):
     def __init__(self, level, start_pos):
         super().__init__(level, start_pos)
-        self.buffered_direction, self.lives, self.score, self.bonus_life_awarded, self.speed = Vector2(0,0), 1, 0, False, PACMAN_SPEED
+        self.buffered_direction, self.lives, self.score, self.bonus_life_awarded, self.speed = Vector2(0,0), 3, 0, False, PACMAN_SPEED
         self.last_direction = Vector2(-1, 0)
         self.anim_frame = 0
         self.anim_timer = 0
@@ -284,18 +289,20 @@ class Fruit:
 class Ghost(Entity):
     def __init__(self, level, start_pos, color, ghost_id):
         super().__init__(level, start_pos)
-        self.color, self.id, self.state, self.speed = color, ghost_id, GHOST_STATE_IN_HOUSE, GHOST_BASE_SPEED
+        self.color, self.id, self.state = color, ghost_id, GHOST_STATE_IN_HOUSE
+        self.base_speed = GHOST_BASE_SPEED
+        self.speed = self.base_speed
         self.scatter_target = Vector2()
         self.calculated_path, self.path_index = None, 0
         self.is_immune = False
         self.in_house_timer = 0
 
     def update(self, pacman, blinky=None, game_controller=None):
+        # FIXED: ghost speed bug - 유령이 집에 도착하면 속도를 기본으로 리셋
         if self.state == GHOST_STATE_EATEN and self.tile_pos == self.start_pos:
-            self.speed = GHOST_BASE_SPEED
             self.state = GHOST_STATE_IN_HOUSE
             self.calculated_path = None
-            # game_controller.add_to_exit_queue(self) # This logic is no longer used
+            self.speed = self.base_speed 
 
         if self.pixel_pos == get_tile_center(self.tile_pos):
             valid_dirs = self.get_valid_directions()
@@ -361,13 +368,14 @@ class Ghost(Entity):
     def get_chase_target(self, pacman, blinky): return pacman.tile_pos
     def reset(self):
         super().reset()
-        self.state, self.speed, self.calculated_path, self.is_immune = GHOST_STATE_IN_HOUSE, GHOST_BASE_SPEED, None, False
+        self.state, self.speed, self.calculated_path, self.is_immune = GHOST_STATE_IN_HOUSE, self.base_speed, None, False
         self.in_house_timer = 0
 
 class Blinky(Ghost):
     def __init__(self, level, start_pos):
         super().__init__(level, start_pos, RED, 0)
         self.scatter_target = Vector2(SCREEN_WIDTH_TILES - 2, 1)
+        self.rage_speed = BLINKY_RAGE_SPEED
         try:
             blinky_img = pygame.image.load(os.path.join(RES_DIR, 'blinky.png')).convert_alpha()
             self.image = pygame.transform.scale(blinky_img, (TILE_WIDTH, TILE_HEIGHT))
@@ -379,9 +387,9 @@ class Blinky(Ghost):
         if self.state not in [GHOST_STATE_FRIGHTENED, GHOST_STATE_EATEN]:
             if game_controller and game_controller.level.total_pellets > 0:
                 pellets_eaten_ratio = (game_controller.level.total_pellets - game_controller.level.pellet_count) / game_controller.level.total_pellets
-                self.speed = GHOST_BASE_SPEED + (BLINKY_RAGE_SPEED - GHOST_BASE_SPEED) * pellets_eaten_ratio
+                self.speed = self.base_speed + (self.rage_speed - self.base_speed) * pellets_eaten_ratio
             else:
-                self.speed = GHOST_BASE_SPEED
+                self.speed = self.base_speed
         
         super().update(pacman, blinky, game_controller)
 
@@ -434,11 +442,20 @@ class GameController:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Pacman"); self.clock, self.font = pygame.time.Clock(), pygame.font.Font(None, 36)
-        self.state = STATE_PLAYING; self.start_new_game()
+        pygame.display.set_caption("Pacman")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.Font(None, 36)
+        self.small_font = pygame.font.Font(None, 28)
+        
+        self.init_game()
 
-    def start_new_game(self):
+    def init_game(self):
+        self.state = STATE_PLAYING
         self.level = Level()
+        self.level.load_level()
+        
+        self.round_level = 1
+        
         self.ghost_images = {}
         try:
             frightened_img = pygame.image.load(os.path.join(RES_DIR, 'frightened.png')).convert_alpha()
@@ -453,8 +470,15 @@ class GameController:
             self.ghost_images = None
 
         self.pacman = Pacman(self.level, self.level.pacman_start_pos)
+        self.pacman.score = 0
+        self.pacman.lives = 3
+        self.pacman.bonus_life_awarded = False
+
         self.ghosts = [Blinky(self.level, self.level.ghost_start_pos[0]), Pinky(self.level, self.level.ghost_start_pos[1]), Inky(self.level, self.level.ghost_start_pos[2]), Clyde(self.level, self.level.ghost_start_pos[3])]
         self.blinky = self.ghosts[0]
+        
+        self.increase_difficulty()
+
         self.frightened_timer, self.scatter_chase_timer, self.current_wave, self.ghost_eaten_score = 0, 0, 0, 200
         self.ghost_mode = GHOST_STATE_SCATTER
         
@@ -468,17 +492,46 @@ class GameController:
 
         self.fruit = Fruit(Vector2(9, 13), None)
         self.fruit_spawn_level = 0
+        
+        self.state = STATE_PAUSED
+        self.pause_timer = 60
 
-        self.win_pacmans = []
-        self.win_angle = 0
+    def increase_difficulty(self):
+        # NEW: 최고 속도 제한 추가
+        max_ghost_speed = PACMAN_SPEED + 0.8
+        max_rage_speed = PACMAN_SPEED + 1.1
+
+        speed_increase = 0.15 * (self.round_level - 1)
+        rage_speed_increase = 0.2 * (self.round_level - 1)
+        for ghost in self.ghosts:
+            ghost.base_speed = min(GHOST_BASE_SPEED + speed_increase, max_ghost_speed)
+            if isinstance(ghost, Blinky):
+                ghost.rage_speed = min(BLINKY_RAGE_SPEED + rage_speed_increase, max_rage_speed)
+
+    def init_round(self):
+        self.level.load_level()
+        self.pacman.reset()
+        for ghost in self.ghosts:
+            ghost.reset()
+        
+        self.fruit.is_active = False
+        self.fruit_spawn_level = 0
+
+        self.state = STATE_PAUSED
+        self.pause_timer = 120
+
+    def start_new_round(self):
+        self.round_level += 1
+        self.increase_difficulty()
+        self.init_round()
+
+    def check_all_pellets_eaten(self):
+        return self.level.pellet_count <= 0
 
     def reset_after_death(self):
         self.pacman.reset()
         for ghost in self.ghosts: ghost.reset()
         self.state, self.pause_timer = STATE_PAUSED, 60
-
-    def add_to_exit_queue(self, ghost):
-        pass
 
     def update(self):
         if self.state == STATE_PLAYING:
@@ -487,42 +540,15 @@ class GameController:
             self.update_ghosts()
             self.handle_fruit_events()
             self.check_collisions()
-            self.check_win_condition()
+            
+            if self.check_all_pellets_eaten():
+                self.start_new_round()
+
         elif self.state == STATE_PAUSED:
             self.pause_timer -= 1
             if self.pause_timer <= 0:
                 self.state = STATE_PLAYING
-        elif self.state == STATE_WIN:
-            self.update_win_screen()
-
-    def update_win_screen(self):
-        self.win_angle += 0.05
-
-        if random.random() < 0.1:
-            confetti_img = self.pacman.animations.get(Vector2(1, 0), [None, None])[0]
-            if confetti_img:
-                confetti_img = pygame.transform.scale(confetti_img, (16, 16))
-                self.win_pacmans.append({
-                    'type': 'confetti',
-                    'image': confetti_img,
-                    'x': random.randint(0, SCREEN_WIDTH),
-                    'y': -16,
-                    'speed': random.uniform(2, 5)
-                })
-
-        center_x, center_y = SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2
-        
-        updated_pacmans = []
-        for pac in self.win_pacmans:
-            if pac['type'] == 'orbital':
-                pac['x'] = center_x + cos(self.win_angle + pac['offset']) * pac['radius']
-                pac['y'] = center_y + sin(self.win_angle + pac['offset']) * pac['radius']
-                updated_pacmans.append(pac)
-            elif pac['type'] == 'confetti':
-                pac['y'] += pac['speed']
-                if pac['y'] < SCREEN_HEIGHT:
-                    updated_pacmans.append(pac)
-        self.win_pacmans = updated_pacmans
+    
     def handle_pellet_eating(self):
         eaten_val = self.level.eat_pellet(self.pacman.tile_pos)
         if eaten_val in [2, 3]:
@@ -562,37 +588,34 @@ class GameController:
                 g.speed = GHOST_FRIGHTENED_SPEED
 
     def update_ghosts(self):
-        # Timer-based ghost exit logic
         for ghost in self.ghosts:
             if ghost.state == GHOST_STATE_IN_HOUSE:
                 ghost.in_house_timer += 1
                 exit_condition = False
-                if ghost.id == 0:  # Blinky
-                    exit_condition = ghost.in_house_timer >= 1
-                elif ghost.id == 1:  # Pinky
-                    exit_condition = ghost.in_house_timer >= 4 * 60
-                elif ghost.id == 2:  # Inky
-                    exit_condition = ghost.in_house_timer >= 8 * 60
-                elif ghost.id == 3:  # Clyde
-                    exit_condition = ghost.in_house_timer >= 12 * 60
+                if ghost.id == 0: exit_condition = ghost.in_house_timer >= 1
+                elif ghost.id == 1: exit_condition = ghost.in_house_timer >= 4 * 60
+                elif ghost.id == 2: exit_condition = ghost.in_house_timer >= 8 * 60
+                elif ghost.id == 3: exit_condition = ghost.in_house_timer >= 12 * 60
                 
                 if exit_condition:
                     ghost.state = GHOST_STATE_EXITING
 
-            # Transition out of house
+            # FIXED: ghost speed bug - 집에서 나올 때 속도를 리셋
             if ghost.state == GHOST_STATE_EXITING and ghost.tile_pos == self.level.ghost_house_exit:
                 if self.frightened_timer > 0 and not ghost.is_immune:
                     ghost.state, ghost.speed = GHOST_STATE_FRIGHTENED, GHOST_FRIGHTENED_SPEED
                 else:
                     ghost.state = self.ghost_mode
+                    ghost.speed = ghost.base_speed
 
-        # Frightened mode timer
         if self.frightened_timer > 0:
             self.frightened_timer -= 1
             if self.frightened_timer == 0:
+                # FIXED: ghost speed bug - Frightened 상태가 끝나면 속도를 리셋
                 for g in self.ghosts: 
-                    if g.state == GHOST_STATE_FRIGHTENED: g.state = self.ghost_mode
-        # Scatter/Chase mode timer
+                    if g.state == GHOST_STATE_FRIGHTENED:
+                        g.state = self.ghost_mode
+                        g.speed = g.base_speed
         else:
             self.scatter_chase_timer += 1
             waves = [(7*60, 20*60), (7*60, 20*60), (5*60, 20*60), (float('inf'), 5*60)]
@@ -604,7 +627,6 @@ class GameController:
                     self.scatter_chase_timer = 0
                     if self.ghost_mode == GHOST_STATE_SCATTER: self.current_wave += 1
 
-        # Update all ghosts
         for ghost in self.ghosts:
             if ghost.state not in [GHOST_STATE_FRIGHTENED, GHOST_STATE_EATEN, GHOST_STATE_IN_HOUSE, GHOST_STATE_EXITING]:
                 ghost.state = self.ghost_mode
@@ -625,65 +647,90 @@ class GameController:
         
         if pacman_died:
             self.pacman.lives -= 1
-            if self.pacman.lives < 0: self.state = STATE_GAME_OVER
-            else: self.reset_after_death()
+            if self.pacman.lives > 0:
+                self.reset_after_death()
+            else:
+                self.pacman.lives = 0
+                self.state = STATE_GAME_OVER
 
-    def check_win_condition(self):
-        if self.level.pellet_count <= 0 and self.state != STATE_WIN:
-            self.state = STATE_WIN
-            self.win_pacmans = []
-            self.win_angle = 0
-            pac_image = self.pacman.animations.get(Vector2(1, 0), [None, None])[0]
-            if pac_image:
-                for i in range(5):
-                    self.win_pacmans.append({
-                        'type': 'orbital',
-                        'image': pac_image,
-                        'radius': 80 + i * 15,
-                        'offset': (2 * 3.14159 / 5) * i,
-                        'x': 0,
-                        'y': 0
-                    })
     def draw(self):
         self.screen.fill(BLACK)
-        if self.state == STATE_WIN:
-            self.draw_end_screen("YOU WIN!")
-            for pac in self.win_pacmans:
-                rect = pac['image'].get_rect(center=(pac['x'], pac['y']))
-                self.screen.blit(pac['image'], rect)
-        else:
+        if self.state == STATE_PLAYING or self.state == STATE_PAUSED:
             self.level.draw(self.screen)
             self.pacman.draw(self.screen)
             self.fruit.draw(self.screen)
             for ghost in self.ghosts:
                 ghost.draw(self.screen, self)
             self.draw_ui()
-            if self.state == STATE_GAME_OVER:
-                self.draw_end_screen("GAME OVER")
+        
         pygame.display.flip()
 
     def draw_ui(self):
         self.screen.blit(self.font.render(f"Score: {self.pacman.score}", True, WHITE), (10, 10))
+        self.screen.blit(self.font.render(f"Round: {self.round_level}", True, WHITE), (SCREEN_WIDTH // 2 - 60, 10))
         self.screen.blit(self.font.render(f"Lives: {self.pacman.lives}", True, WHITE), (SCREEN_WIDTH - 120, 10))
 
-    def draw_end_screen(self, msg):
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA); overlay.fill((0,0,0,150)); self.screen.blit(overlay, (0,0))
-        text = self.font.render(msg, True, YELLOW); self.screen.blit(text, text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2-20)))
-        score = self.font.render(f"Final Score: {self.pacman.score}", True, WHITE); self.screen.blit(score, score.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2+20)))
+    def game_over_loop(self):
+        button_width, button_height = 120, 50
+        retry_button_rect = pygame.Rect(SCREEN_WIDTH/2 - button_width - 20, SCREEN_HEIGHT/2 + 50, button_width, button_height)
+        quit_button_rect = pygame.Rect(SCREEN_WIDTH/2 + 20, SCREEN_HEIGHT/2 + 50, button_width, button_height)
+
+        while True:
+            mouse_pos = pygame.mouse.get_pos()
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if retry_button_rect.collidepoint(mouse_pos):
+                        self.init_game()
+                        return
+                    if quit_button_rect.collidepoint(mouse_pos):
+                        pygame.quit()
+                        sys.exit()
+
+            self.screen.fill(BLACK)
+            
+            title_text = self.font.render("Game Over", True, YELLOW)
+            self.screen.blit(title_text, title_text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2 - 50)))
+
+            score_text = self.small_font.render(f"Final Score: {self.pacman.score}", True, WHITE)
+            self.screen.blit(score_text, score_text.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/2)))
+
+            retry_color = BUTTON_HOVER_COLOR if retry_button_rect.collidepoint(mouse_pos) else BUTTON_COLOR
+            pygame.draw.rect(self.screen, retry_color, retry_button_rect, border_radius=10)
+            retry_text = self.small_font.render("Retry", True, BUTTON_TEXT_COLOR)
+            self.screen.blit(retry_text, retry_text.get_rect(center=retry_button_rect.center))
+
+            quit_color = BUTTON_HOVER_COLOR if quit_button_rect.collidepoint(mouse_pos) else BUTTON_COLOR
+            pygame.draw.rect(self.screen, quit_color, quit_button_rect, border_radius=10)
+            quit_text = self.small_font.render("Quit", True, BUTTON_TEXT_COLOR)
+            self.screen.blit(quit_text, quit_text.get_rect(center=quit_button_rect.center))
+
+            pygame.display.flip()
+            self.clock.tick(60)
 
     def run(self):
         running = True
         while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT: running = False
-                if event.type == pygame.KEYDOWN:
-                    if self.state in [STATE_GAME_OVER, STATE_WIN] or event.key == pygame.K_ESCAPE: running = False
-                    elif event.key == pygame.K_LEFT: self.pacman.set_direction(Vector2(-1,0))
-                    elif event.key == pygame.K_RIGHT: self.pacman.set_direction(Vector2(1,0))
-                    elif event.key == pygame.K_UP: self.pacman.set_direction(Vector2(0,-1))
-                    elif event.key == pygame.K_DOWN: self.pacman.set_direction(Vector2(0,1))
-            self.update(); self.draw(); self.clock.tick(60)
+            if self.state == STATE_GAME_OVER:
+                self.game_over_loop()
+            else: # STATE_PLAYING or STATE_PAUSED
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT: running = False
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE: running = False
+                        elif event.key == pygame.K_LEFT: self.pacman.set_direction(Vector2(-1,0))
+                        elif event.key == pygame.K_RIGHT: self.pacman.set_direction(Vector2(1,0))
+                        elif event.key == pygame.K_UP: self.pacman.set_direction(Vector2(0,-1))
+                        elif event.key == pygame.K_DOWN: self.pacman.set_direction(Vector2(0,1))
+                self.update()
+                self.draw()
+
+            self.clock.tick(60)
         pygame.quit()
+        sys.exit()
 
 if __name__ == '__main__':
     game = GameController()
